@@ -120,6 +120,7 @@ final class L10n: ObservableObject {
         "recovery.waitingForActivity": ("Waiting for steady posture and activity · will resume automatically", "等待稳定姿态与操作 · 满足条件后自动恢复", "安定した姿勢と操作を待機中 · 自動で再開します"),
         "recovery.needsForward": ("Direction needs confirmation · effects paused", "方向待确认 · 触发已暂停", "向きの確認が必要 · 動作を一時停止"),
         "recovery.automatic": ("Forward direction estimated", "已自动估计正前方", "正面方向を自動推定しました"),
+        "recovery.deliveryPaused": ("Waiting for fresh motion · reference retained", "等待实时运动数据 · 保留原校准", "最新の動作データ待機中 · 基準を保持"),
         "recovery.manual": ("Forward direction set", "正前方已校准", "正面方向を設定しました"),
         "recovery.center": ("Sit straight & recenter", "坐正并归零", "背筋を伸ばしてリセット"),
         "recovery.enabled": ("Quiet recovery after reconnecting", "重新佩戴后自动恢复方向", "再接続後に向きを自動復元"),

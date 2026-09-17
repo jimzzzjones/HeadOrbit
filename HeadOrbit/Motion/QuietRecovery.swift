@@ -184,7 +184,7 @@ struct MotionContinuity {
             lastRoll = roll
         }
         guard let previous = lastTimestamp, let arrived = lastArrival else { return true }
-        if timestamp <= previous || timestamp - previous > 0.5 || arrival - arrived > 0.5 ||
+        if timestamp <= previous || timestamp - previous > 0.5 ||
             arrival < arrived || lastSide != side { return false }
         // A large jump with almost no angular velocity may be an unannounced reference reset.
         if speed < 8 {

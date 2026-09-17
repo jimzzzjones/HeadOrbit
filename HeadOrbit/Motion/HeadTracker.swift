@@ -27,6 +27,7 @@ final class HeadTracker: NSObject, ObservableObject {
     enum CalibrationState: Equatable { case recovering, waitingForActivity, needsForward, automatic, manual }
     @Published private(set) var isCalibrated = false
     @Published private(set) var isPostureCalibrated = false
+    @Published private(set) var motionDataFresh = false
     @Published private(set) var calibrationState: CalibrationState = .recovering
     @Published private(set) var recoveryReason: QuietRecovery.Reason = .activity
     @Published private(set) var recenterShortcutAvailable = false
@@ -59,13 +60,14 @@ final class HeadTracker: NSObject, ObservableObject {
     let diagnostics = MotionDiagnostics()
     private var calibrationEpoch = 0
     let didInvalidateCalibration = PassthroughSubject<Void, Never>()
+    let didPauseMotion = PassthroughSubject<Void, Never>()
+    private var delivery = MotionDelivery()
     private var reference: CMAttitude?
     private var recoveryAttitudes: [(time: TimeInterval, attitude: CMAttitude)] = []
     private var yawZero: Double?
     private var recovery = QuietRecovery()
     private var recoveryReasonUpdatedAt: TimeInterval = -.infinity
     private var continuity = MotionContinuity()
-    private var lastArrival: TimeInterval?
     private var sessionGeneration = 0
     private var workspaceObservers: [NSObjectProtocol] = []
     private var suspensionReasons = Set<String>()
@@ -80,7 +82,6 @@ final class HeadTracker: NSObject, ObservableObject {
     private var manualReconnectUntil: TimeInterval = 0
     private var lastRebuildAt: TimeInterval = -.infinity
 
-    private let staleInterval: TimeInterval = 0.5
 
     override init() {
         super.init()
@@ -126,7 +127,7 @@ final class HeadTracker: NSObject, ObservableObject {
                 return
             }
             guard let motion else { return }
-            if self.lastArrival == nil {
+            if self.delivery.lastTimestamp == nil {
                 log.notice("first sample: sensor=\(motion.sensorLocation.rawValue)")
                 self.isReconnecting = false
             }
@@ -213,17 +214,17 @@ final class HeadTracker: NSObject, ObservableObject {
     }
 
     private var freshSample: Bool {
-        MotionContinuity.sampleIsFresh(isTracking: status.isTracking, lastArrival: lastArrival,
-                                       now: ProcessInfo.processInfo.systemUptime)
+        status.isTracking && motionDataFresh && delivery.isFresh(at: ProcessInfo.processInfo.systemUptime)
     }
 
-    private func invalidateCalibration() {
+    private func invalidateCalibration(resetDelivery: Bool = true) {
+        if resetDelivery { delivery = MotionDelivery() }
+        motionDataFresh = false
         calibrationEpoch += 1
         reference = nil
         recoveryAttitudes.removeAll(keepingCapacity: true)
         yawZero = nil
         lastAttitude = nil
-        lastArrival = nil
         isCalibrated = false
         isPostureCalibrated = false
         calibrationState = quietRecoveryEnabled ? .waitingForActivity : .needsForward
@@ -245,22 +246,37 @@ final class HeadTracker: NSObject, ObservableObject {
             reconnectSchedule.request(at: now, delay: 3)
             return
         }
+        guard delivery.state != .expired else { return }
         if !continuity.accept(timestamp: motion.timestamp, arrival: now,
                               side: motion.sensorLocation.rawValue, yaw: yaw, speed: speed,
                               pitch: motion.attitude.pitch.degrees, roll: motion.attitude.roll.degrees) {
-            invalidateCalibration()
+            let clockReset = delivery.lastTimestamp.map { motion.timestamp <= $0 } ?? false
+            invalidateCalibration(resetDelivery: clockReset)
             _ = continuity.accept(timestamp: motion.timestamp, arrival: now,
                                   side: motion.sensorLocation.rawValue, yaw: yaw, speed: speed,
-                              pitch: motion.attitude.pitch.degrees, roll: motion.attitude.roll.degrees)
+                                  pitch: motion.attitude.pitch.degrees, roll: motion.attitude.roll.degrees)
         }
+        let side = SensorSide(motion.sensorLocation)
+        if status != .tracking(side) { status = .tracking(side) }
+        let deliveryState = delivery.receive(timestamp: motion.timestamp, arrival: now)
+        if deliveryState == .expired {
+            expireMotion(at: now)
+            return
+        }
+        guard deliveryState == .fresh else {
+            pauseMotion()
+            recordDiagnostics(motion, at: now, pose: nil)
+            return
+        }
+        if !motionDataFresh, reference != nil {
+            log.notice("motion delivery resumed with retained reference: epoch=\(self.calibrationEpoch)")
+        }
+        motionDataFresh = true
         reconnectSchedule.receivedSample()
         reconnectExhausted = false
         isReconnecting = false
         lastAttitude = motion.attitude.copy() as? CMAttitude
-        lastArrival = now
         lastError = nil
-        let side = SensorSide(motion.sensorLocation)
-        if status != .tracking(side) { status = .tracking(side) }
 
         let interaction = InteractionSignal.latest(at: now)
         if yawZero == nil, quietRecoveryEnabled {
@@ -299,20 +315,50 @@ final class HeadTracker: NSObject, ObservableObject {
         p.applyReferenceValidity(hasReference: reference != nil, yawZero: yawZero, rawYaw: yaw)
         pose = p
         samples.send(p)
+        recordDiagnostics(motion, at: now, pose: p)
+    }
+
+    private func pauseMotion() {
+        if motionDataFresh {
+            motionDataFresh = false
+            pose.yawCalibrated = false
+            pose.postureCalibrated = false
+            didPauseMotion.send()
+            log.notice("motion delivery paused; retaining reference")
+        }
+        if !isCalibrated {
+            recovery = QuietRecovery()
+            recoveryAttitudes.removeAll(keepingCapacity: true)
+            calibrationState = quietRecoveryEnabled ? .waitingForActivity : .needsForward
+            recoveryReason = .activity
+        }
+    }
+
+    private func expireMotion(at now: TimeInterval) {
+        invalidateCalibration(resetDelivery: false)
+        status = .waitingForHeadphones
+        reconnectSchedule.request(at: now)
+        log.notice("motion delivery expired; reference invalidated")
+    }
+
+    private func recordDiagnostics(_ motion: CMDeviceMotion, at now: TimeInterval, pose p: HeadPose?) {
+        let interaction = InteractionSignal.latest(at: now)
         diagnostics.record(.init(time: now, sensorTime: motion.timestamp, epoch: calibrationEpoch,
-                                 rawYaw: yaw, yaw: p.yaw, rawPitch: motion.attitude.pitch.degrees,
-                                 rawRoll: motion.attitude.roll.degrees,
+                                 rawYaw: -motion.attitude.yaw.degrees, yaw: p?.yaw ?? 0,
+                                 rawPitch: motion.attitude.pitch.degrees, rawRoll: motion.attitude.roll.degrees,
                                  rotationX: motion.rotationRate.x.degrees,
                                  rotationY: motion.rotationRate.y.degrees,
                                  rotationZ: motion.rotationRate.z.degrees,
-                                 acceleration: acceleration, side: motion.sensorLocation.rawValue,
-                                 yawValid: isCalibrated, postureValid: isPostureCalibrated,
+                                 acceleration: sqrt(pow(motion.userAcceleration.x, 2) + pow(motion.userAcceleration.y, 2) + pow(motion.userAcceleration.z, 2)),
+                                 side: motion.sensorLocation.rawValue,
+                                 yawValid: p?.yawCalibrated ?? false, postureValid: p?.postureCalibrated ?? false,
                                  mode: String(describing: calibrationState),
                                  activityAge: interaction.map { now - $0 },
                                  recoveryReason: calibrationState == .manual ? "manual" : recovery.reason.rawValue,
                                  recoveryWindows: calibrationState == .manual ? 0 : recovery.completedWindows,
-                                 relativePitch: isPostureCalibrated ? p.pitch : nil,
-                                 referenceSource: isPostureCalibrated ? (calibrationState == .manual ? "manual" : "stable-window-sample") : "none"))
+                                 relativePitch: p.flatMap { $0.postureCalibrated ? $0.pitch : nil },
+                                 referenceSource: isPostureCalibrated ? (calibrationState == .manual ? "manual" : "stable-window-sample") : "none",
+                                 deliveryState: delivery.state.rawValue, deliveryLag: delivery.lag))
     }
 
     private func observeWorkspace() {
@@ -340,10 +386,12 @@ final class HeadTracker: NSObject, ObservableObject {
 
     private func checkStale() {
         let now = ProcessInfo.processInfo.systemUptime
-        if status.isTracking, let last = lastArrival, now - last > staleInterval {
-            invalidateCalibration()
-            status = .waitingForHeadphones
-            reconnectSchedule.request(at: now)
+        if status.isTracking {
+            switch delivery.poll(at: now) {
+            case .expired: expireMotion(at: now)
+            case .delayed, .settling: pauseMotion()
+            case .fresh: break
+            }
         }
         if isReconnecting, now >= manualReconnectUntil { isReconnecting = false }
         routeTick += 1

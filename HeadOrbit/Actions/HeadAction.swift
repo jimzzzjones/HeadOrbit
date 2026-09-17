@@ -22,7 +22,7 @@ final class ActionEngine: ObservableObject {
     convenience init(tracker: HeadTracker, actions: [HeadAction]) {
         self.init(samples: tracker.samples.eraseToAnyPublisher(),
                   tracking: tracker.$status.map(\.isTracking).eraseToAnyPublisher(),
-                  resets: Publishers.Merge(tracker.didRecenter, tracker.didInvalidateCalibration).eraseToAnyPublisher(),
+                  resets: Publishers.Merge3(tracker.didRecenter, tracker.didInvalidateCalibration, tracker.didPauseMotion).eraseToAnyPublisher(),
                   actions: actions)
     }
 

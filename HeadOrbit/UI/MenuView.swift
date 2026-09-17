@@ -40,7 +40,7 @@ struct MenuView: View {
     private var header: some View {
         HStack {
             Circle()
-                .fill(tracker.status.isTracking && tracker.isCalibrated ? Color.green : Color.orange)
+                .fill(tracker.motionDataFresh && tracker.isCalibrated ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
             Text("HeadOrbit").font(.headline)
             Spacer()
@@ -96,13 +96,13 @@ struct MenuView: View {
                 .accessibilityIdentifier("recovery.status")
             gauge(l10n.t("pose.yaw"), tracker.pose.yaw,
                   highlight: tracker.isCalibrated && blur.isEnabled && abs(tracker.pose.yaw) > blur.thresholdDegrees,
-                  valid: tracker.isCalibrated)
+                  valid: tracker.isCalibrated && tracker.motionDataFresh)
             gauge(l10n.t(tracker.isPostureCalibrated ? "pose.pitch" : "pose.pitchUncalibrated"), tracker.pose.pitch,
                   highlight: tracker.isPostureCalibrated && posture.isEnabled && posture.isOver(tracker.pose.pitch),
-                  valid: tracker.status.isTracking)
+                  valid: tracker.motionDataFresh)
             HStack(spacing: 6) {
                 Button(l10n.t("recovery.center")) { tracker.recenter() }
-                    .disabled(!tracker.status.isTracking)
+                    .disabled(!tracker.motionDataFresh)
                     .controlSize(.small)
                     .accessibilityIdentifier("recovery.recenter")
                 Text(tracker.recenterShortcutAvailable ? "⌃⌥⌘C" : l10n.t("recovery.shortcutUnavailable"))
@@ -116,6 +116,7 @@ struct MenuView: View {
 
     private var calibrationKey: String {
         guard tracker.status.isTracking else { return "recovery.waiting" }
+        guard tracker.motionDataFresh else { return tracker.isCalibrated ? "recovery.deliveryPaused" : "status.waitingMotion" }
         switch tracker.calibrationState {
         case .recovering, .waitingForActivity: return "recovery.reason.\(tracker.recoveryReason.rawValue)"
         case .needsForward: return "recovery.needsForward"
@@ -200,6 +201,7 @@ struct MenuView: View {
     // MARK: Text helpers
 
     private var statusText: String {
+        if tracker.status.isTracking && !tracker.motionDataFresh { return l10n.t("status.waitingMotion") }
         switch tracker.status {
         case .unsupported: return l10n.t("status.unsupported")
         case .denied: return l10n.t("status.denied")

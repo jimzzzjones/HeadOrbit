@@ -24,7 +24,10 @@ There is no camera or screen-position measurement. A stable sideways pose or a s
 - After a 2-second warmup, three windows of at least 1.5 seconds and 15 samples must agree. The windows are separated by 1 second.
 - Trimmed angle ranges tolerate small oscillations and isolated spikes. Large movement or excessive acceleration clears the current window, while inconsistent direction, data gaps, or invalid timestamps can reject the attempt.
 - Tested motion tolerance includes ±1–3° oscillations at 0.35–1.2 Hz across four phases. This is a bounded replay test, not a guarantee for every human movement.
-- Effects wait for a valid reference. Uncentered Pitch is still shown and clearly labeled. Disconnects and invalid sensor references clear the previous calibration.
+- Brief delivery delays pause effects while preserving a completed reference. Buffered samples cannot update calibration or actions. A quarter second of timely delivery is required before resuming. The sensor timestamp/side/reference continuity checks still apply; five seconds without fresh data expires the reference and enters reconnection.
+- Effects wait for a valid reference. Uncentered Pitch is still shown and clearly labeled. Disconnects and invalid sensor references clear the previous calibration; delivery delay alone does not immediately clear it.
+
+短暂回调延迟时保留已完成的校准并暂停效果，积压旧帧不参与校准或动作。数据连续及时到达至少四分之一秒后恢复；真正的传感器断档、换耳、参考异常或五秒内仍无新鲜数据则清除参考。
 
 一次操作开启固定 15 秒观察，重复操作不会延长；失败后冷却 5 秒，再由新操作触发重试。预热 2 秒后，需要三个相互一致的短窗口。采用去除极端样本后的角度范围，允许小幅摆动；大幅运动会清除当前窗口，持续方向变化或数据异常可能中止本次尝试。
 
@@ -40,6 +43,6 @@ Brief playback on the Mac helped motion resume in one observed case. It is offer
 
 ## Diagnostics and privacy / 诊断与隐私
 
-A bounded, approximately 10 Hz rolling buffer holds up to two minutes of motion diagnostics in memory. Export is explicit through a save dialog. CSV columns include relative/raw angles, sensor side, validity, input-event age, recovery reason, and reference source. No audio or typed text is captured. The app does not upload the export.
+A bounded, approximately 10 Hz rolling buffer holds up to two minutes of motion diagnostics in memory. Export is explicit through a save dialog. CSV columns include relative/raw angles, sensor side, validity, input-event age, recovery reason, reference source, delivery state, and relative delivery lag. No audio or typed text is captured. The app does not upload the export.
 
 近两分钟运动诊断保存在有上限的内存缓冲中，约每秒十条。只有你主动选择导出并指定路径时才生成 CSV，包含角度、耳机侧别、有效性、操作距今时间、恢复原因和参考来源，不包含音频或输入文字，也不会上传。公开分享前请自行检查并删去不想公开的信息。

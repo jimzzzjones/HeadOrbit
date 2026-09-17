@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6 (12) — 2026-09-17
+
+- Preserve the existing Pitch/Yaw reference across brief callback delays; pause effects until current motion catches up. / 短暂回调延迟后保留 Pitch/Yaw 原参考，数据追上前暂停效果。
+- Exclude buffered samples from actions, automatic recovery, and manual recentering. Restart action dwell after resuming. / 积压帧不参与动作或校准，恢复后重新计算动作持续时间。
+- Invalidate on genuine sensor discontinuity, side change, reference jump, disconnect, or five seconds without fresh data; queued callbacks cannot renew that deadline. / 真正断档、换耳、参考跳变、断连或五秒无新鲜数据仍作废参考，旧回调不能延长等待。
+- Add delivery state and relative delivery lag to diagnostic CSV (22 columns), with freshness reflected in controls. / 诊断 CSV 增加到达状态与相对延迟，共 22 列；界面同步显示等待状态。
+- Add regression coverage for callback order, backlog, deadline, clock rollback, calibration gating, and effect reset. / 增加回调顺序、积压、期限、时间回退、校准限制与效果解除的回归覆盖。
+
 ## 0.1.6 (11) — 2026-09-17
 
 Fork improvements based on [Cogria-AI/HeadOrbit v0.1.5](https://github.com/Cogria-AI/HeadOrbit/tree/v0.1.5).

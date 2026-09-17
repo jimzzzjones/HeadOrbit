@@ -23,6 +23,8 @@ final class MotionDiagnostics {
         var recoveryWindows: Int = 0
         var relativePitch: Double? = nil
         var referenceSource: String = "none"
+        var deliveryState: String = "fresh"
+        var deliveryLag: Double = 0
     }
 
     private(set) var rows: [Row] = []
@@ -35,16 +37,17 @@ final class MotionDiagnostics {
 
     func csv() -> String {
         let first = rows.first?.time ?? 0
-        var result = "elapsed_s,sensor_time_s,epoch,raw_yaw_deg,relative_yaw_deg,raw_pitch_deg,raw_roll_deg,rotation_x_deg_s,rotation_y_deg_s,rotation_z_deg_s,acceleration_g,sensor_side,yaw_valid,posture_valid,calibration,activity_age_s,recovery_reason,completed_windows,relative_pitch_deg,reference_source\n"
+        var result = "elapsed_s,sensor_time_s,epoch,raw_yaw_deg,relative_yaw_deg,raw_pitch_deg,raw_roll_deg,rotation_x_deg_s,rotation_y_deg_s,rotation_z_deg_s,acceleration_g,sensor_side,yaw_valid,posture_valid,calibration,activity_age_s,recovery_reason,completed_windows,relative_pitch_deg,reference_source,delivery_state,delivery_lag_s\n"
         for row in rows {
             let values = [row.time - first, row.sensorTime, row.rawYaw, row.yaw, row.rawPitch,
                           row.rawRoll, row.rotationX, row.rotationY, row.rotationZ, row.acceleration]
                 .map { String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), $0) }
             let activity = row.activityAge.map { String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? ""
             let pitch = row.relativePitch.map { String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), $0) } ?? ""
+            let lag = String(format: "%.6f", locale: Locale(identifier: "en_US_POSIX"), row.deliveryLag)
             result += ([values[0], values[1], String(row.epoch)] + Array(values.dropFirst(2)) +
                        [String(row.side), row.yawValid ? "1" : "0", row.postureValid ? "1" : "0", row.mode,
-                        activity, row.recoveryReason, String(row.recoveryWindows), pitch, row.referenceSource]).joined(separator: ",") + "\n"
+                        activity, row.recoveryReason, String(row.recoveryWindows), pitch, row.referenceSource, row.deliveryState, lag]).joined(separator: ",") + "\n"
         }
         return result
     }

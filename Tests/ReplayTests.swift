@@ -255,11 +255,11 @@ final class ContinuityTests {
         var c = seeded()
         XCTAssertFalse(c.accept(timestamp: 1, arrival: 100.1, side: 1, yaw: 0, speed: 0))
     }
-    func testMotionOrDeliveryGapInvalidates() {
+    func testSensorGapInvalidatesButDeliveryGapPreservesContinuity() {
         var c = seeded()
         XCTAssertFalse(c.accept(timestamp: 11, arrival: 101, side: 1, yaw: 0, speed: 0))
         c = seeded()
-        XCTAssertFalse(c.accept(timestamp: 10.1, arrival: 103, side: 1, yaw: 0, speed: 0))
+        XCTAssertTrue(c.accept(timestamp: 10.1, arrival: 103, side: 1, yaw: 0, speed: 0))
     }
     func testUnannouncedReferenceJumpsInAllAxesInvalidate() {
         var c = seeded()
@@ -272,6 +272,143 @@ final class ContinuityTests {
     func testRealFastTurnDoesNotMasqueradeAsReset() {
         var c = seeded()
         XCTAssertTrue(c.accept(timestamp: 10.1, arrival: 100.1, side: 1, yaw: 45, speed: 450))
+    }
+}
+
+final class DeliveryTests {
+    private func seeded() -> MotionDelivery {
+        var d = MotionDelivery()
+        for i in 0...10 { _ = d.receive(timestamp: Double(i)/10, arrival: 100 + Double(i)/10) }
+        XCTAssertEqual(d.state, .fresh)
+        return d
+    }
+
+    func testDelayedCallbacksKeepClockAnchorUntilCaughtUp() {
+        var d = seeded()
+        XCTAssertEqual(d.receive(timestamp: 1.16, arrival: 102.044586), .delayed)
+        XCTAssertFalse(d.isFresh(at: 102.044586))
+        XCTAssertLessThan(abs(d.lag - 0.884586), 0.000001)
+        XCTAssertEqual(d.receive(timestamp: 1.60, arrival: 102.146), .delayed)
+        XCTAssertFalse(d.isFresh(at: 102.146))
+        XCTAssertEqual(d.receive(timestamp: 2.18, arrival: 102.248), .delayed)
+        XCTAssertEqual(d.receive(timestamp: 2.40, arrival: 102.41), .settling)
+        XCTAssertEqual(d.receive(timestamp: 2.60, arrival: 102.61), .settling)
+        XCTAssertFalse(d.isFresh(at: 102.61))
+        XCTAssertEqual(d.receive(timestamp: 2.70, arrival: 102.71), .fresh)
+        XCTAssertTrue(d.isFresh(at: 102.71))
+    }
+
+    func testTimerBeforeOrAfterDelayedCallbackHasSameOutcome() {
+        var a = seeded(), b = seeded()
+        XCTAssertEqual(a.poll(at: 101.6), .delayed)
+        for pair in [(1.16, 102.044586), (1.60, 102.146), (2.18, 102.248), (2.40, 102.41), (2.60, 102.61), (2.70, 102.71)] {
+            XCTAssertEqual(a.receive(timestamp: pair.0, arrival: pair.1), b.receive(timestamp: pair.0, arrival: pair.1))
+        }
+        XCTAssertEqual(a.state, .fresh)
+        XCTAssertEqual(b.state, .fresh)
+    }
+
+    func testPreviousLagCountsWhenTimerHasNotRun() {
+        var a = seeded()
+        XCTAssertEqual(a.receive(timestamp: 1.1, arrival: 101.29), .fresh)
+        var b = a
+        XCTAssertEqual(a.poll(at: 101.61), .delayed)
+        XCTAssertEqual(a.receive(timestamp: 1.6, arrival: 101.74), .delayed)
+        XCTAssertEqual(b.receive(timestamp: 1.6, arrival: 101.74), .delayed)
+        XCTAssertFalse(a.isFresh(at: 101.74))
+        XCTAssertFalse(b.isFresh(at: 101.74))
+    }
+
+    func testSlowInitialCatchUpDoesNotPassSettlingWindow() {
+        var d = MotionDelivery()
+        for i in 0...50 {
+            XCTAssertTrue(d.receive(timestamp: Double(i) * 0.06, arrival: 100 + Double(i) * 0.05) != .fresh)
+        }
+        for i in 1...8 { _ = d.receive(timestamp: 3 + Double(i) * 0.05, arrival: 102.5 + Double(i) * 0.05) }
+        XCTAssertTrue(d.isFresh(at: 102.9))
+    }
+
+    func testNoFramesExpireWithoutRepeatedInvalidationOrTimerDependency() {
+        var a = seeded(), b = seeded()
+        XCTAssertEqual(a.poll(at: 101.6), .delayed)
+        XCTAssertEqual(a.poll(at: 105.99), .delayed)
+        XCTAssertEqual(a.poll(at: 106), .expired)
+        XCTAssertEqual(a.poll(at: 107), .expired)
+        XCTAssertEqual(b.receive(timestamp: 1.1, arrival: 106), .expired)
+        XCTAssertEqual(b.receive(timestamp: 7, arrival: 107), .expired)
+    }
+
+    func testContinuousOldCallbacksCannotRenewExpiryBudget() {
+        var d = seeded()
+        for i in 1...39 {
+            let now = 102 + Double(i)/10
+            XCTAssertTrue(d.receive(timestamp: now - 101, arrival: now) != .fresh)
+        }
+        XCTAssertEqual(d.receive(timestamp: 5, arrival: 106), .expired)
+    }
+
+    func testInitialBacklogCannotEstablishFreshReferenceWhileCatchingUp() {
+        var d = MotionDelivery()
+        for i in 0...10 {
+            XCTAssertTrue(d.receive(timestamp: Double(i)/10, arrival: 100 + Double(i)/100) != .fresh)
+        }
+        XCTAssertFalse(d.isFresh(at: 100.1))
+        for i in 1...4 { _ = d.receive(timestamp: 1 + Double(i)/10, arrival: 100.1 + Double(i)/10) }
+        XCTAssertTrue(d.isFresh(at: 100.5))
+    }
+
+    func testInvalidClockAndClockRollbackExpire() {
+        for pair in [(1.1, 100.9), (0.9, 101.1), (Double.nan, 101.1), (1.1, Double.infinity)] {
+            var d = seeded()
+            XCTAssertEqual(d.receive(timestamp: pair.0, arrival: pair.1), .expired)
+        }
+        var d = seeded()
+        XCTAssertEqual(d.poll(at: 100.9), .expired)
+    }
+
+    func testDelayCannotSupplyManualOrAutomaticCalibration() {
+        var d = seeded()
+        var recovery = QuietRecovery()
+        var referencePitch = 12.5
+        var lastManualPitch = 12.5
+        let before = referencePitch
+        for i in 0..<30 {
+            let t = 102 + Double(i)/10
+            let state = d.receive(timestamp: t - 101, arrival: t)
+            if state == .fresh {
+                lastManualPitch = 25
+                if recovery.update(.init(time: t, yaw: 0, pitch: 25, roll: 0,
+                                         rotationSpeed: 0, acceleration: 0, lastInteraction: t)) != nil {
+                    referencePitch = 25
+                }
+            }
+            XCTAssertFalse(d.isFresh(at: t))
+        }
+        XCTAssertEqual(referencePitch, before)
+        XCTAssertEqual(lastManualPitch, 12.5)
+        XCTAssertEqual(recovery.completedWindows, 0)
+    }
+
+    func testPausedEffectsClearAndFreshDwellStartsAgain() {
+        let samples = PassthroughSubject<HeadPose, Never>()
+        let tracking = PassthroughSubject<Bool, Never>()
+        let pauses = PassthroughSubject<Void, Never>()
+        let posture = ActionGateTests.PostureDwellProbe()
+        let engine = ActionEngine(samples: samples.eraseToAnyPublisher(), tracking: tracking.eraseToAnyPublisher(),
+                                  resets: pauses.eraseToAnyPublisher(), actions: [posture])
+        func send(_ t: Double) { samples.send(.init(yaw: 0, pitch: 20, roll: 0, timestamp: t,
+                                                    yawCalibrated: true, postureCalibrated: true)) }
+        for t in [0.0, 1, 2.1] { send(t) }
+        XCTAssertTrue(posture.trigger.isActive)
+        var d = seeded()
+        if d.poll(at: 101.6) == .delayed { pauses.send() }
+        XCTAssertFalse(posture.trigger.isActive)
+        send(5)
+        send(6)
+        XCTAssertFalse(posture.trigger.isActive)
+        send(7.1)
+        XCTAssertTrue(posture.trigger.isActive)
+        withExtendedLifetime(engine) {}
     }
 }
 
@@ -475,7 +612,7 @@ final class DiagnosticTests {
         XCTAssertTrue(d.rows.count <= 1201)
         XCTAssertTrue(d.rows.first!.time >= 180)
         let lines = d.csv().split(separator: "\n")
-        XCTAssertTrue(lines.allSatisfy { $0.split(separator: ",", omittingEmptySubsequences: false).count == 20 })
+        XCTAssertTrue(lines.allSatisfy { $0.split(separator: ",", omittingEmptySubsequences: false).count == 22 })
         XCTAssertTrue(lines[0].contains("raw_yaw_deg"))
     }
 }
@@ -484,6 +621,16 @@ final class DiagnosticTests {
 struct ReplayRunner {
     static func main() {
         let cases: [(String, () -> Void)] = [
+            ("testPreviousLagCountsWhenTimerHasNotRun", DeliveryTests().testPreviousLagCountsWhenTimerHasNotRun),
+            ("testSlowInitialCatchUpDoesNotPassSettlingWindow", DeliveryTests().testSlowInitialCatchUpDoesNotPassSettlingWindow),
+            ("testDelayedCallbacksKeepClockAnchorUntilCaughtUp", DeliveryTests().testDelayedCallbacksKeepClockAnchorUntilCaughtUp),
+            ("testTimerBeforeOrAfterDelayedCallbackHasSameOutcome", DeliveryTests().testTimerBeforeOrAfterDelayedCallbackHasSameOutcome),
+            ("testNoFramesExpireWithoutRepeatedInvalidationOrTimerDependency", DeliveryTests().testNoFramesExpireWithoutRepeatedInvalidationOrTimerDependency),
+            ("testContinuousOldCallbacksCannotRenewExpiryBudget", DeliveryTests().testContinuousOldCallbacksCannotRenewExpiryBudget),
+            ("testInitialBacklogCannotEstablishFreshReferenceWhileCatchingUp", DeliveryTests().testInitialBacklogCannotEstablishFreshReferenceWhileCatchingUp),
+            ("testInvalidClockAndClockRollbackExpire", DeliveryTests().testInvalidClockAndClockRollbackExpire),
+            ("testDelayCannotSupplyManualOrAutomaticCalibration", DeliveryTests().testDelayCannotSupplyManualOrAutomaticCalibration),
+            ("testPausedEffectsClearAndFreshDwellStartsAgain", DeliveryTests().testPausedEffectsClearAndFreshDwellStartsAgain),
             ("testAbnormallyDenseSamplesCannotGrowWindowWithoutBound", RecoveryTests().testAbnormallyDenseSamplesCannotGrowWindowWithoutBound),
             ("testRelativePitchDoesNotAcquireRawEulerYaw", ActionGateTests().testRelativePitchDoesNotAcquireRawEulerYaw),
             ("testNaturalSmallMovementsAcrossPhasesAndSpeeds", RecoveryTests().testNaturalSmallMovementsAcrossPhasesAndSpeeds),
@@ -518,7 +665,7 @@ struct ReplayRunner {
             ("testNormalStreamAndAngleWrap", ContinuityTests().testNormalStreamAndAngleWrap),
             ("testSideSwitchInvalidates", ContinuityTests().testSideSwitchInvalidates),
             ("testSensorClockRollbackInvalidates", ContinuityTests().testSensorClockRollbackInvalidates),
-            ("testMotionOrDeliveryGapInvalidates", ContinuityTests().testMotionOrDeliveryGapInvalidates),
+            ("testSensorGapInvalidatesButDeliveryGapPreservesContinuity", ContinuityTests().testSensorGapInvalidatesButDeliveryGapPreservesContinuity),
             ("testUnannouncedReferenceJumpsInAllAxesInvalidate", ContinuityTests().testUnannouncedReferenceJumpsInAllAxesInvalidate),
             ("testRealFastTurnDoesNotMasqueradeAsReset", ContinuityTests().testRealFastTurnDoesNotMasqueradeAsReset),
             ("testUncalibratedPitchIsGatedAndCalibratedPitchIsDelivered", ActionGateTests().testUncalibratedPitchIsGatedAndCalibratedPitchIsDelivered),

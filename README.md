@@ -19,7 +19,7 @@ Look away from the screen, and it blurs. Slouch until your chin comes up, and it
 > **Status: an experiment, made for fun.**
 > Inspired by [this post by @bryllim_](https://x.com/bryllim_/status/2099049704822907277). This is a weekend-project-grade tool, not a product. Expect rough edges.
 
-## This fork: 0.1.6 (11)
+## This fork: 0.1.6 (12)
 
 This repository maintains improvements to [Cogria-AI/HeadOrbit](https://github.com/Cogria-AI/HeadOrbit), based on upstream v0.1.5. The original author, artwork, and MIT license are retained. This remains experimental software.
 
@@ -29,6 +29,8 @@ This repository maintains improvements to [Cogria-AI/HeadOrbit](https://github.c
 - **Clearer controls:** `⌃⌥⌘C` to sit straight and recenter, recovery status/reasons, motion diagnostics export, and the complete version/build number in the lower-left corner.
 
 See the [changelog](CHANGELOG.md), [recovery guide and limitations](docs/RECOVERY.md), and [validation scope](docs/VALIDATION.md).
+
+**Build 12:** brief delivery delays pause effects and preserve the existing calibration. Buffered samples cannot recenter the app; a real sensor discontinuity or five seconds without fresh data invalidates the reference.
 
 ## Features
 

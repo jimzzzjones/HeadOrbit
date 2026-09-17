@@ -1,6 +1,16 @@
-# Validation scope — 0.1.6 (11)
+# Validation scope — 0.1.6 (12)
 
-## Local evidence
+## Build 12 regression checks
+
+The suite now includes 49 replay scenarios, adding delayed-callback timing, timer/callback ordering, bounded expiry with continuous backlog, startup catch-up, clock rollback, stale calibration gating, and reset/restart of posture dwell. The timing regression uses a synthetic stream with a 1.044586-second arrival interval and only a 0.160-second sensor advance; no personal CSV is committed. Diagnostic exports now contain 22 columns.
+
+On the locally installed build 12, a live headphone session established an automatic reference, paused on delayed delivery, and resumed with the same reference epoch. A subsequent actual disconnect invalidated the reference. This is one observed session, not coverage of every reconnection or long-term drift.
+
+This fixes unintended reference resets after short delivery delays. It does not establish continuous hardware drift correction. Build 11's live-device observations below are historical and do not replace new-device validation.
+
+## Historical build 11 evidence
+
+
 
 The final application source passed **39 replay scenarios with zero failed assertions**, repeated independently. Re-run on macOS:
 

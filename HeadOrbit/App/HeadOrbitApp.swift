@@ -18,6 +18,11 @@ struct HeadOrbitApp: App {
         _engine = StateObject(wrappedValue: engine)
         tracker.start()
         L10n.shared.applyAppearance()
+        if ProcessInfo.processInfo.arguments.contains("--show-settings") {
+            DispatchQueue.main.async {
+                SettingsWindow.show(tracker: tracker, blur: blur, posture: posture)
+            }
+        }
     }
 
     var body: some Scene {
@@ -27,7 +32,13 @@ struct HeadOrbitApp: App {
                 .environmentObject(blurAction)
                 .environmentObject(postureAction)
         } label: {
-            Image(nsImage: tracker.status.isTracking ? MenuBarIcon.connected : MenuBarIcon.disconnected)
+            HStack(spacing: 2) {
+                Image(nsImage: tracker.status.isTracking ? MenuBarIcon.connected : MenuBarIcon.disconnected)
+                if tracker.status.isTracking && !tracker.isCalibrated {
+                    Circle().fill(.orange).frame(width: 4, height: 4)
+                }
+            }
+            .accessibilityLabel("HeadOrbit")
         }
         .menuBarExtraStyle(.window)
     }

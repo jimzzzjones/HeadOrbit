@@ -6,6 +6,7 @@ protocol HeadAction: AnyObject {
     var id: String { get }
     var title: String { get }
     var isEnabled: Bool { get set }
+    var needsPostureCalibration: Bool { get }
 
     /// 每一帧姿态都会调到这里（主线程）
     func process(_ pose: HeadPose)
@@ -18,24 +19,26 @@ final class ActionEngine: ObservableObject {
     let actions: [HeadAction]
     private var bag = Set<AnyCancellable>()
 
-    init(tracker: HeadTracker, actions: [HeadAction]) {
+    convenience init(tracker: HeadTracker, actions: [HeadAction]) {
+        self.init(samples: tracker.samples.eraseToAnyPublisher(),
+                  tracking: tracker.$status.map(\.isTracking).eraseToAnyPublisher(),
+                  resets: Publishers.Merge(tracker.didRecenter, tracker.didInvalidateCalibration).eraseToAnyPublisher(),
+                  actions: actions)
+    }
+
+    init(samples: AnyPublisher<HeadPose, Never>, tracking: AnyPublisher<Bool, Never>,
+         resets: AnyPublisher<Void, Never>, actions: [HeadAction]) {
         self.actions = actions
-
-        tracker.samples
-            .sink { [weak self] pose in
-                self?.actions.forEach { if $0.isEnabled { $0.process(pose) } }
+        samples.sink { [weak self] pose in
+            self?.actions.forEach {
+                if $0.isEnabled && ($0.needsPostureCalibration ? pose.postureCalibrated : pose.yawCalibrated) {
+                    $0.process(pose)
+                } else { $0.reset() }
             }
-            .store(in: &bag)
-
-        tracker.$status
-            .removeDuplicates()
-            .sink { [weak self] status in
-                if !status.isTracking { self?.actions.forEach { $0.reset() } }
-            }
-            .store(in: &bag)
-
-        tracker.didRecenter
-            .sink { [weak self] in self?.actions.forEach { $0.reset() } }
-            .store(in: &bag)
+        }.store(in: &bag)
+        tracking.removeDuplicates().sink { [weak self] isTracking in
+            if !isTracking { self?.actions.forEach { $0.reset() } }
+        }.store(in: &bag)
+        resets.sink { [weak self] in self?.actions.forEach { $0.reset() } }.store(in: &bag)
     }
 }

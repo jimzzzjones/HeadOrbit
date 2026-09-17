@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  replay-and-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Replay tests
+        run: DEVELOPER_DIR="$(xcode-select -p)" ./script/test.sh
+      - name: Build and verify app
+        run: DEVELOPER_DIR="$(xcode-select -p)" ./script/build_and_run.sh --build
+      - name: Check whitespace
+        run: git diff --check

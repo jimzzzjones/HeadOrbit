@@ -7,6 +7,7 @@ struct MenuView: View {
     @ObservedObject private var l10n = L10n.shared
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 12) {
             header
             Divider()
@@ -18,10 +19,19 @@ struct MenuView: View {
             Divider()
             postureSection
             Divider()
+            DisclosureGroup(l10n.t("diagnostics.title")) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(l10n.t("diagnostics.help")).font(.caption).foregroundStyle(.secondary)
+                    Button(l10n.t("diagnostics.export")) { tracker.diagnostics.export() }
+                        .controlSize(.small)
+                }
+            }.font(.caption)
             footer
+            Text("\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")) · \(l10n.t("build.local"))").font(.caption2).foregroundStyle(.tertiary)
         }
         .padding(14)
-        .frame(width: 300)
+        }
+        .frame(width: 340, height: min(760, (NSScreen.main?.visibleFrame.height ?? 840) - 80))
         .onAppear { tracker.refresh() }
     }
 
@@ -30,7 +40,7 @@ struct MenuView: View {
     private var header: some View {
         HStack {
             Circle()
-                .fill(tracker.status.isTracking ? Color.green : Color.orange)
+                .fill(tracker.status.isTracking && tracker.isCalibrated ? Color.green : Color.orange)
                 .frame(width: 8, height: 8)
             Text("HeadOrbit").font(.headline)
             Spacer()
@@ -52,6 +62,13 @@ struct MenuView: View {
             }
             if case .tracking(let side) = tracker.status {
                 row(l10n.t("device.source"), sideText(side))
+            } else if tracker.authorization == .authorized, tracker.bluetoothAudioPresent {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(l10n.t(tracker.reconnectExhausted ? "status.motionUnavailable" : "status.restoringMotion"))
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button(l10n.t(tracker.isReconnecting ? "device.reconnecting" : "device.reconnect")) { tracker.reconnect() }
+                        .controlSize(.small).disabled(tracker.isReconnecting)
+                }
             } else if tracker.authorization == .authorized, tracker.headphonesRoutedAway {
                 HStack(spacing: 6) {
                     Text(l10n.t("status.routedAway")).font(.callout).foregroundStyle(.secondary)
@@ -75,14 +92,35 @@ struct MenuView: View {
 
     private var poseSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            gauge(l10n.t("pose.yaw"), tracker.pose.yaw, highlight: blur.isEnabled && abs(tracker.pose.yaw) > blur.thresholdDegrees)
-            gauge(l10n.t("pose.pitch"), tracker.pose.pitch, highlight: posture.isEnabled && posture.isOver(tracker.pose.pitch))
+            Text(l10n.t(calibrationKey)).font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("recovery.status")
+            gauge(l10n.t("pose.yaw"), tracker.pose.yaw,
+                  highlight: tracker.isCalibrated && blur.isEnabled && abs(tracker.pose.yaw) > blur.thresholdDegrees,
+                  valid: tracker.isCalibrated)
+            gauge(l10n.t(tracker.isPostureCalibrated ? "pose.pitch" : "pose.pitchUncalibrated"), tracker.pose.pitch,
+                  highlight: tracker.isPostureCalibrated && posture.isEnabled && posture.isOver(tracker.pose.pitch),
+                  valid: tracker.status.isTracking)
             HStack(spacing: 6) {
-                Button(l10n.t(tracker.isCalibrated ? "pose.recalibrate" : "pose.calibrate")) { tracker.recenter() }
+                Button(l10n.t("recovery.center")) { tracker.recenter() }
                     .disabled(!tracker.status.isTracking)
                     .controlSize(.small)
-                info("pose.help")
+                    .accessibilityIdentifier("recovery.recenter")
+                Text(tracker.recenterShortcutAvailable ? "⌃⌥⌘C" : l10n.t("recovery.shortcutUnavailable"))
+                    .font(.caption).foregroundStyle(.secondary)
             }
+            Toggle(l10n.t("recovery.enabled"), isOn: $tracker.quietRecoveryEnabled)
+                .font(.callout).accessibilityIdentifier("recovery.enabled")
+            Text(l10n.t("recovery.help")).font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private var calibrationKey: String {
+        guard tracker.status.isTracking else { return "recovery.waiting" }
+        switch tracker.calibrationState {
+        case .recovering, .waitingForActivity: return "recovery.reason.\(tracker.recoveryReason.rawValue)"
+        case .needsForward: return "recovery.needsForward"
+        case .automatic: return "recovery.automatic"
+        case .manual: return "recovery.manual"
         }
     }
 
@@ -93,7 +131,7 @@ struct MenuView: View {
                 info("blur.help")
             }
             Group {
-                labeledSlider(l10n.t("blur.threshold"), value: $blur.thresholdDegrees, range: 0...90, step: 1, unit: "°")
+                labeledSlider(l10n.t("blur.threshold"), value: $blur.thresholdDegrees, range: 10...90, step: 1, unit: "°")
                 labeledSlider(l10n.t("blur.dwell"), value: $blur.dwellSeconds, range: 0...2, step: 0.1, unit: "s")
                 labeledSlider(l10n.t("blur.dim"), value: $blur.dimAmount, range: 0...0.6, step: 0.05, unit: "")
             }
@@ -114,6 +152,11 @@ struct MenuView: View {
             HStack(spacing: 6) {
                 Toggle(l10n.t("posture.title"), isOn: $posture.isEnabled)
                 info("posture.help")
+            }
+            if posture.isEnabled && !tracker.isPostureCalibrated {
+                Text(l10n.t("recovery.posturePending")).font(.caption).foregroundStyle(.secondary)
+            } else if posture.isEnabled && tracker.calibrationState == .automatic {
+                Text(l10n.t("recovery.postureEstimated")).font(.caption).foregroundStyle(.secondary)
             }
             Group {
                 labeledSlider(l10n.t("posture.threshold", String(format: "%+.0f", tracker.pose.pitch)),
@@ -162,7 +205,9 @@ struct MenuView: View {
         case .denied: return l10n.t("status.denied")
         case .restricted: return l10n.t("status.restricted")
         case .waitingForPermission: return l10n.t("status.waitingPermission")
-        case .waitingForHeadphones: return l10n.t(tracker.headphonesRoutedAway ? "status.routedAway" : "status.waitingHeadphones")
+        case .waitingForHeadphones:
+            if tracker.bluetoothAudioPresent { return l10n.t("status.waitingMotion") }
+            return l10n.t(tracker.headphonesRoutedAway ? "status.routedAway" : "status.waitingHeadphones")
         case .tracking(let side): return l10n.t("status.tracking", sideText(side))
         }
     }
@@ -203,7 +248,7 @@ struct MenuView: View {
         .font(.callout)
     }
 
-    private func gauge(_ label: String, _ value: Double, highlight: Bool) -> some View {
+    private func gauge(_ label: String, _ value: Double, highlight: Bool, valid: Bool = true) -> some View {
         HStack {
             Text(label).font(.callout).foregroundStyle(.secondary).frame(width: 110, alignment: .leading)
             ZStack(alignment: .leading) {
@@ -218,7 +263,7 @@ struct MenuView: View {
                 }
             }
             .frame(height: 6)
-            Text(String(format: "%+.0f°", value))
+            Text(valid ? String(format: "%+.0f°", value) : "—")
                 .font(.system(.callout, design: .monospaced))
                 .frame(width: 48, alignment: .trailing)
         }

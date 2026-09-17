@@ -4,6 +4,8 @@ import Carbon
 /// 应用不在前台也能收到。只在需要的时候 register()，用完 unregister()，避免长期霸占按键。
 final class GlobalHotKey {
     static let escape = UInt32(kVK_Escape)
+    static let recenter = UInt32(kVK_ANSI_C)
+    static let recenterModifiers = UInt32(controlKey | optionKey | cmdKey)
 
     private static var registry: [UInt32: GlobalHotKey] = [:]
     private static var nextID: UInt32 = 1

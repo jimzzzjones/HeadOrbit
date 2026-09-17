@@ -19,6 +19,17 @@
 > **状态：实验性质，做着玩的。**
 > 创意灵感来自 [@bryllim_ 的这条推文](https://x.com/bryllim_/status/2099049704822907277)。这是一个周末项目级别的小工具，不是产品，边角会有点糙。
 
+## 本分支：0.1.6 (11)
+
+本仓库基于 [Cogria-AI/HeadOrbit](https://github.com/Cogria-AI/HeadOrbit) v0.1.5 进行改进，保留原作者署名、图像和 MIT 许可，仍属于实验性软件。
+
+- **重新连接后自动恢复方向**：一次点击、按键或滚动即可开始观察，允许自然的小幅头部动作，无需反复点击。
+- **完整姿态校准**：Yaw、Pitch 和 Roll 共用同一个相对姿态参考；自动参考建立或手动归零后，Pitch 和坐姿提醒可继续工作。
+- **重连处理改进**：观察蓝牙输入、输出变化，进行有次数上限的重试，区分“音频已连接”和“已收到运动数据”。
+- **操作与诊断**：`⌃⌥⌘C` 坐正并归零，显示恢复状态及等待原因，可手动导出运动诊断，左下角显示完整版本号与构建号。
+
+详见[更新日志](CHANGELOG.md)、[自动恢复说明与限制](docs/RECOVERY.md)和[验证范围](docs/VALIDATION.md)。
+
 ## 功能
 
 - **看向别处时模糊屏幕。** 头向左或向右转过设定角度，整个屏幕柔和地模糊；转回来即恢复。
@@ -29,7 +40,7 @@
 - **中文 / English / 日本語**，跟随系统语言，也可以在菜单里手动切换。
 - **亮色 / 暗色 / 跟随系统**三种面板外观。
 
-所有数据都留在你的 Mac 上。不联网，不录屏，不需要账号。
+应用不上传数据、不联网、不使用摄像头、麦克风录音或录屏。自动恢复只查询最近输入事件距今多久，不读取按键内容。运动诊断仅在内存保留，由你主动导出为 CSV；分享前请检查文件内容。
 
 ## 要求
 
@@ -42,40 +53,42 @@
 
 ### 方式一：直接下载
 
-到 [Releases](https://github.com/Cogria-AI/HeadOrbit/releases) 页面下载最新的 `HeadOrbit-vX.Y.Z.dmg`，打开后把 `HeadOrbit` 拖进「应用程序」文件夹。
+请从[本分支的 Releases](https://github.com/jimzzzjones/HeadOrbit/releases) 下载可用安装包，并查看对应说明中的架构、版本及签名状态。GitHub 自动生成的源码压缩包不是可直接运行的应用；尚无安装包时，请按下方步骤编译。
 
-这个应用没有经过 Apple 公证，第一次打开时 macOS 会提示无法验证开发者。**右键点击应用 → 打开 → 打开**即可，或者执行一次：
-
-```bash
-xattr -d com.apple.quarantine /Applications/HeadOrbit.app
-```
+构建使用临时签名，**未经过 Apple 公证**。macOS 可能阻止下载的应用；确认来源可信后，可通过系统“隐私与安全性”的批准流程打开。
 
 ### 方式二：源码编译
 
+安装包含 Swift 5.9 或更新版本的 Apple Command Line Tools，然后执行：
+
 ```bash
-brew install xcodegen          # 只需一次
-git clone https://github.com/Cogria-AI/HeadOrbit.git
+git clone https://github.com/jimzzzjones/HeadOrbit.git
 cd HeadOrbit
-./build.sh
-open build/Build/Products/Debug/HeadOrbit.app
+./script/test.sh
+./script/build_and_run.sh --build
+open dist/HeadOrbit.app
 ```
 
-需要 Xcode 15 或更新。
+构建适用于当前 Mac 的架构。如果目录受 iCloud 同步影响，可使用 `HEADORBIT_APP_BUNDLE=/private/tmp/HeadOrbit.app ./script/build_and_run.sh --build` 将应用放在非同步目录。脚本默认使用 `/Library/Developer/CommandLineTools`；完整 Xcode 安装可通过 `DEVELOPER_DIR` 指定。
+
+也可安装 Xcode 15+ 与 XcodeGen，执行 `./build.sh` 构建 Xcode 项目；`./package.sh` 生成临时签名的 DMG。[贡献指南](CONTRIBUTING.md)列出了检查步骤。
 
 ### 第一次启动
 
-macOS 会询问**运动与健身**权限，允许即可，这是 HeadOrbit 唯一需要的权限。HeadOrbit 只住在菜单栏里，没有 Dock 图标，也没有窗口。
+macOS 会询问**运动与健身**权限，允许即可，这是 HeadOrbit 唯一需要的权限。HeadOrbit 默认显示在菜单栏，没有 Dock 图标。开发调试时可用 `open dist/HeadOrbit.app --args --show-settings` 打开持久设置窗口。
 
 ## 使用
 
 1. 戴上 AirPods，确认它连接的是这台 Mac。
 2. 点菜单栏里的 HeadOrbit 图标。顶部状态应显示**正在追踪（左耳）**或**正在追踪（右耳）**，告诉你是哪只耳机在提供数据。
-3. 坐直、平视屏幕，点**以当前姿态为正前方**。之后所有角度都相对这个姿态计算，换了椅子或者换了心情就再点一次。
+3. 开启**重新佩戴后自动恢复方向**，面向屏幕并点击、输入或滚动一次，随后自然使用即可。收集稳定参考时允许小幅动作。如需立即准确设定，坐直面向屏幕，点**坐正并归零**，或按 `⌃⌥⌘C`。
 4. 打开你想要的功能，调一调滑块。
 
 <p align="center">
   <img src="docs/panel-zh.png" alt="HeadOrbit 菜单" width="320">
 </p>
+
+*上图为原版界面示意；当前面板还包含自动恢复控制与完整构建号。*
 
 菜单里每个功能旁边都有一个小 ⓘ 图标，鼠标悬停会显示一句话说明。
 
@@ -102,12 +115,25 @@ macOS 会询问**运动与健身**权限，允许即可，这是 HeadOrbit 唯�
 
 都在菜单底部。语言默认：系统是中文就显示中文，日文就显示日文，否则英文。
 
+## 校准限制
+
+自动恢复将本次稳定姿态作为参考，无法知道屏幕的位置，也无法确认你是否坐直。恢复后参考保持固定，不会持续学习或修正漂移。有偏差时，请坐直面向屏幕手动归零。参考尚未建立时暂停触发效果；实时 Pitch 会标注“未归零”。
+
 ## 常见问题
 
 **戴着 AirPods 却显示「未检测到支持头部追踪的耳机」**
 - 确认耳机连的是 Mac 而不是 iPhone（控制中心 → 声音）。
 - 摘下来再戴上。只有戴着的时候才会传运动数据。
 - 确认型号支持头部追踪（见「要求」）。
+
+**音频已连接，但还没有运动数据**
+- 保持佩戴并连接到这台 Mac，音频和运动数据可能在不同时间恢复。
+- 自动重试结束后可点**重新连接**。曾观察到在 Mac 短暂播放音频能加快恢复，但不能保证每次有效；应用不会自动播放音频或强制切换路由。
+
+**一直等待自动恢复**
+- 面向屏幕，点击、输入或滚动一次即可，HeadOrbit 面板内的操作也有效。
+- 允许自然小幅动作；大幅转动、方向不一致或数据间断仍可能中止恢复。观察超时并经过短暂冷却后，下次操作会重新尝试。
+- 需要立即恢复时按 `⌃⌥⌘C` 手动归零。详见[自动恢复说明](docs/RECOVERY.md)。
 
 **运动与健身权限被拒绝**
 - 系统设置 → 隐私与安全性 → 运动与健身 → 打开 HeadOrbit。

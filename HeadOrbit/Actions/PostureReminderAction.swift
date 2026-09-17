@@ -9,6 +9,7 @@ private let log = Logger(subsystem: "com.cogria.HeadOrbit", category: "Posture")
 /// 触发角度可以是 0 或负数（校准时没坐太直的话会用到），含义不变。
 /// 实测 AirPods 抬头时 Pitch 为正、低头为负，所以默认 +15；低头永远不会高于阈值，自然不算。
 final class PostureReminderAction: ObservableObject, HeadAction {
+    let needsPostureCalibration = true
     let id = "posture-reminder"
     let title = "坐姿提醒"
 

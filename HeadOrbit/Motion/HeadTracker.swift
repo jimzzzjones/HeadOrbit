@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import CoreMotion
 import Foundation
@@ -23,13 +24,31 @@ final class HeadTracker: NSObject, ObservableObject {
     @Published private(set) var status: Status = .waitingForPermission
     @Published private(set) var authorization: CMAuthorizationStatus = CMHeadphoneMotionManager.authorizationStatus()
     @Published private(set) var pose: HeadPose = .zero
+    enum CalibrationState: Equatable { case recovering, waitingForActivity, needsForward, automatic, manual }
     @Published private(set) var isCalibrated = false
+    @Published private(set) var isPostureCalibrated = false
+    @Published private(set) var calibrationState: CalibrationState = .recovering
+    @Published private(set) var recoveryReason: QuietRecovery.Reason = .activity
+    @Published private(set) var recenterShortcutAvailable = false
+    @Published var quietRecoveryEnabled = UserDefaults.standard.object(forKey: "recovery.enabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(quietRecoveryEnabled, forKey: "recovery.enabled")
+            if !isCalibrated {
+                recovery = QuietRecovery()
+                recoveryReason = .activity
+                calibrationState = quietRecoveryEnabled ? .waitingForActivity : .needsForward
+            }
+        }
+    }
     @Published private(set) var lastError: String?
     /// 手动重连后的冷却：期间按钮禁用并显示「连接中」，避免连点把正在建立的会话拆掉
     @Published private(set) var isReconnecting = false
-    /// 耳机当前不是这台 Mac 的音频输出（通常是自动切换到了 iPhone / iPad）。
-    /// 实测这时候系统仍会回「已连接」，但一帧数据都不会来；耳机回到 Mac 后数据自动恢复。
     @Published private(set) var headphonesRoutedAway = false
+    @Published private(set) var bluetoothAudioPresent = false
+    @Published private(set) var reconnectExhausted = false
+    private var routeMonitor: AudioRouteMonitor?
+    private var routeSnapshot: AudioRouteSnapshot?
+    private var reconnectSchedule = ReconnectSchedule()
 
     /// 每一帧都会推送（比 @Published pose 更适合做逻辑，不受 SwiftUI 合并影响）
     let samples = PassthroughSubject<HeadPose, Never>()
@@ -37,26 +56,49 @@ final class HeadTracker: NSObject, ObservableObject {
     let didRecenter = PassthroughSubject<Void, Never>()
 
     private var manager = CMHeadphoneMotionManager()
+    let diagnostics = MotionDiagnostics()
+    private var calibrationEpoch = 0
+    let didInvalidateCalibration = PassthroughSubject<Void, Never>()
     private var reference: CMAttitude?
+    private var recoveryAttitudes: [(time: TimeInterval, attitude: CMAttitude)] = []
+    private var yawZero: Double?
+    private var recovery = QuietRecovery()
+    private var recoveryReasonUpdatedAt: TimeInterval = -.infinity
+    private var continuity = MotionContinuity()
+    private var lastArrival: TimeInterval?
+    private var sessionGeneration = 0
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var suspensionReasons = Set<String>()
+    private lazy var recenterKey = GlobalHotKey(keyCode: GlobalHotKey.recenter,
+                                               modifiers: GlobalHotKey.recenterModifiers) { [weak self] in
+        self?.recenter()
+    }
     private var lastAttitude: CMAttitude?
-    private var lastSampleAt: Date?
     private var staleTimer: Timer?
     private var permissionTimer: Timer?
-    private var connectCheckTimer: Timer?
-    /// 每次「耳机断开 → 重新连上」只自动重建一次会话，避免无数据时无限循环
-    private var autoReconnectArmed = true
-    /// 系统回「已连接」之后等这么久还没数据，就自动重建一次。
-    /// 实测首帧延迟 0.25s 到 10s+ 都见过，所以宽限期必须给足，太短会把正要建立的流拆掉。
-    private let connectGrace: TimeInterval = 20
     private var connectedByDelegate = false
+    private var manualReconnectUntil: TimeInterval = 0
+    private var lastRebuildAt: TimeInterval = -.infinity
 
-    /// 超过这个时间没收到数据就当作耳机没在用（摘下 / 切到 iPhone / 断开）
-    private let staleInterval: TimeInterval = 2.0
+    private let staleInterval: TimeInterval = 0.5
 
     override init() {
         super.init()
+        calibrationState = quietRecoveryEnabled ? .waitingForActivity : .needsForward
         manager.delegate = self
         refreshStatus()
+        observeWorkspace()
+        routeMonitor = AudioRouteMonitor { [weak self] in self?.refreshAudioRoute() }
+    }
+
+    deinit {
+        staleTimer?.invalidate()
+        permissionTimer?.invalidate()
+        manager.delegate = nil
+        manager.stopDeviceMotionUpdates()
+        manager.stopConnectionStatusUpdates()
+        for observer in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        recenterKey.unregister()
     }
 
     var isDeviceMotionAvailable: Bool { manager.isDeviceMotionAvailable }
@@ -64,24 +106,29 @@ final class HeadTracker: NSObject, ObservableObject {
 
     func start() {
         log.notice("start: available=\(self.manager.isDeviceMotionAvailable) active=\(self.manager.isDeviceMotionActive) auth=\(CMHeadphoneMotionManager.authorizationStatus().rawValue) connectionStatusActive=\(self.manager.isConnectionStatusActive)")
+        guard suspensionReasons.isEmpty else { return }
+        recenterKey.register()
+        recenterShortcutAvailable = recenterKey.isRegistered
         guard manager.isDeviceMotionAvailable else { status = .unsupported; return }
         guard !manager.isDeviceMotionActive else { return }
         lastError = nil
         manager.startConnectionStatusUpdates()
+        let generation = sessionGeneration
         manager.startDeviceMotionUpdates(to: .main) { [weak self] motion, error in
-            guard let self else { return }
+            guard let self, generation == self.sessionGeneration, self.suspensionReasons.isEmpty else { return }
             if let error {
                 log.error("deviceMotion error: \(error.localizedDescription, privacy: .public) \((error as NSError).domain, privacy: .public)/\((error as NSError).code)")
+                self.invalidateCalibration()
+                self.status = .waitingForHeadphones
+                self.reconnectSchedule.request(at: ProcessInfo.processInfo.systemUptime, delay: 3)
                 self.lastError = error.localizedDescription
                 self.refreshStatus()
                 return
             }
             guard let motion else { return }
-            if self.lastSampleAt == nil {
+            if self.lastArrival == nil {
                 log.notice("first sample: sensor=\(motion.sensorLocation.rawValue)")
-                self.autoReconnectArmed = true
                 self.isReconnecting = false
-                self.connectCheckTimer?.invalidate(); self.connectCheckTimer = nil
             }
             self.handle(motion)
         }
@@ -91,6 +138,10 @@ final class HeadTracker: NSObject, ObservableObject {
             self?.checkStale()
         }
         refreshStatus()
+        refreshAudioRoute()
+        if bluetoothAudioPresent || connectedByDelegate {
+            reconnectSchedule.request(at: ProcessInfo.processInfo.systemUptime, delay: 12)
+        }
         // 首次启动会弹「运动与健身」授权框。系统不会回调告诉我们用户点了什么，
         // 所以在未决期间轮询；一旦授权，重启采集，保证会话是在授权之后建立的。
         if authorization == .notDetermined { startPermissionPolling() }
@@ -104,83 +155,218 @@ final class HeadTracker: NSObject, ObservableObject {
     /// 用户手动点「重新连接」：销毁当前采集会话，换一个全新的 CMHeadphoneMotionManager 重来。
     /// 用于「先开程序后戴耳机」或系统那边的传感器流卡住没数据的情况。
     func reconnect() {
-        guard !isReconnecting else { return }
-        log.notice("manual reconnect")
+        guard !isReconnecting, suspensionReasons.isEmpty else { return }
+        manualReconnectUntil = ProcessInfo.processInfo.systemUptime + 5
         isReconnecting = true
+        reconnectSchedule = ReconnectSchedule()
+        reconnectSchedule.request(at: ProcessInfo.processInfo.systemUptime, delay: 12)
         rebuildSession()
-        DispatchQueue.main.asyncAfter(deadline: .now() + connectGrace) { [weak self] in
-            self?.isReconnecting = false
-        }
     }
 
     private func rebuildSession() {
-        connectCheckTimer?.invalidate(); connectCheckTimer = nil
+        sessionGeneration += 1
+        invalidateCalibration()
+        lastRebuildAt = ProcessInfo.processInfo.systemUptime
         manager.stopDeviceMotionUpdates()
         manager.stopConnectionStatusUpdates()
         manager.delegate = nil
         manager = CMHeadphoneMotionManager()
         manager.delegate = self
-        lastSampleAt = nil
         status = .waitingForHeadphones
         start()
     }
 
     func stop() {
         log.notice("stop")
+        sessionGeneration += 1
+        reconnectSchedule = ReconnectSchedule()
+        invalidateCalibration()
+        recenterKey.unregister()
+        recenterShortcutAvailable = false
+        status = .waitingForHeadphones
         manager.stopDeviceMotionUpdates()
         manager.stopConnectionStatusUpdates()
         staleTimer?.invalidate(); staleTimer = nil
         permissionTimer?.invalidate(); permissionTimer = nil
-        connectCheckTimer?.invalidate(); connectCheckTimer = nil
-        lastSampleAt = nil
         refreshStatus()
     }
 
-    /// 把当前姿态当作「正对屏幕」
     func recenter() {
-        guard let att = lastAttitude?.copy() as? CMAttitude else { return }
+        guard freshSample, let att = lastAttitude?.copy() as? CMAttitude else { return }
         reference = att
+        recoveryAttitudes.removeAll(keepingCapacity: true)
+        isPostureCalibrated = true
+        recenterYaw()
+        pose = HeadPose(yaw: 0, pitch: 0, roll: 0, timestamp: pose.timestamp,
+                        yawCalibrated: true, postureCalibrated: true)
+    }
+
+    func recenterYaw() {
+        guard freshSample, let att = lastAttitude else { return }
+        yawZero = wrappedDegrees(-att.yaw.degrees)
         isCalibrated = true
-        pose = .zero
-        log.notice("recenter")
+        calibrationState = .manual
+        pose.yaw = 0
+        pose.yawCalibrated = true
+        log.notice("manual yaw recenter")
         didRecenter.send()
     }
 
-    // MARK: - Private
+    private var freshSample: Bool {
+        MotionContinuity.sampleIsFresh(isTracking: status.isTracking, lastArrival: lastArrival,
+                                       now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    private func invalidateCalibration() {
+        calibrationEpoch += 1
+        reference = nil
+        recoveryAttitudes.removeAll(keepingCapacity: true)
+        yawZero = nil
+        lastAttitude = nil
+        lastArrival = nil
+        isCalibrated = false
+        isPostureCalibrated = false
+        calibrationState = quietRecoveryEnabled ? .waitingForActivity : .needsForward
+        recoveryReason = .activity
+        recovery = QuietRecovery()
+        continuity = MotionContinuity()
+        pose = .zero
+        didInvalidateCalibration.send()
+    }
 
     private func handle(_ motion: CMDeviceMotion) {
-        lastAttitude = motion.attitude
-        lastSampleAt = Date()
+        let now = ProcessInfo.processInfo.systemUptime
+        let yaw = -motion.attitude.yaw.degrees
+        let speed = sqrt(pow(motion.rotationRate.x, 2) + pow(motion.rotationRate.y, 2) + pow(motion.rotationRate.z, 2)).degrees
+        let acceleration = sqrt(pow(motion.userAcceleration.x, 2) + pow(motion.userAcceleration.y, 2) + pow(motion.userAcceleration.z, 2))
+        guard [yaw, motion.attitude.pitch, motion.attitude.roll, speed, acceleration, motion.timestamp].allSatisfy(\.isFinite) else {
+            invalidateCalibration()
+            status = .waitingForHeadphones
+            reconnectSchedule.request(at: now, delay: 3)
+            return
+        }
+        if !continuity.accept(timestamp: motion.timestamp, arrival: now,
+                              side: motion.sensorLocation.rawValue, yaw: yaw, speed: speed,
+                              pitch: motion.attitude.pitch.degrees, roll: motion.attitude.roll.degrees) {
+            invalidateCalibration()
+            _ = continuity.accept(timestamp: motion.timestamp, arrival: now,
+                                  side: motion.sensorLocation.rawValue, yaw: yaw, speed: speed,
+                              pitch: motion.attitude.pitch.degrees, roll: motion.attitude.roll.degrees)
+        }
+        reconnectSchedule.receivedSample()
+        reconnectExhausted = false
+        isReconnecting = false
+        lastAttitude = motion.attitude.copy() as? CMAttitude
+        lastArrival = now
+        lastError = nil
+        let side = SensorSide(motion.sensorLocation)
+        if status != .tracking(side) { status = .tracking(side) }
+
+        let interaction = InteractionSignal.latest(at: now)
+        if yawZero == nil, quietRecoveryEnabled {
+            recoveryAttitudes.removeAll { now - $0.time > 16 }
+            if recoveryAttitudes.count >= 4096 { recoveryAttitudes.removeFirst() }
+            recoveryAttitudes.append((now, lastAttitude!))
+            if let center = recovery.update(.init(time: now, yaw: yaw, pitch: motion.attitude.pitch.degrees,
+                                                   roll: motion.attitude.roll.degrees, rotationSpeed: speed,
+                                                   acceleration: acceleration, lastInteraction: interaction)) {
+                yawZero = center
+                guard let representative = recoveryAttitudes.first(where: { $0.time == recovery.referenceTime }),
+                      let captured = representative.attitude.copy() as? CMAttitude else {
+                    invalidateCalibration()
+                    return
+                }
+                reference = captured
+                isCalibrated = true
+                isPostureCalibrated = reference != nil
+                recoveryAttitudes.removeAll(keepingCapacity: true)
+                calibrationState = .automatic
+                didRecenter.send()
+                log.notice("quiet direction and posture recovery completed")
+            } else {
+                calibrationState = recovery.state == .waitingForActivity ? .waitingForActivity : .recovering
+            }
+            if recoveryReason != recovery.reason,
+               recovery.state != .collecting || now - recoveryReasonUpdatedAt >= 0.75 {
+                recoveryReason = recovery.reason
+                recoveryReasonUpdatedAt = now
+            }
+        }
 
         let att = motion.attitude.copy() as! CMAttitude
         if let reference { att.multiply(byInverseOf: reference) }
-        let p = HeadPose(attitude: att, timestamp: motion.timestamp)
+        var p = HeadPose(attitude: att, timestamp: motion.timestamp)
+        p.applyReferenceValidity(hasReference: reference != nil, yawZero: yawZero, rawYaw: yaw)
         pose = p
         samples.send(p)
+        diagnostics.record(.init(time: now, sensorTime: motion.timestamp, epoch: calibrationEpoch,
+                                 rawYaw: yaw, yaw: p.yaw, rawPitch: motion.attitude.pitch.degrees,
+                                 rawRoll: motion.attitude.roll.degrees,
+                                 rotationX: motion.rotationRate.x.degrees,
+                                 rotationY: motion.rotationRate.y.degrees,
+                                 rotationZ: motion.rotationRate.z.degrees,
+                                 acceleration: acceleration, side: motion.sensorLocation.rawValue,
+                                 yawValid: isCalibrated, postureValid: isPostureCalibrated,
+                                 mode: String(describing: calibrationState),
+                                 activityAge: interaction.map { now - $0 },
+                                 recoveryReason: calibrationState == .manual ? "manual" : recovery.reason.rawValue,
+                                 recoveryWindows: calibrationState == .manual ? 0 : recovery.completedWindows,
+                                 relativePitch: isPostureCalibrated ? p.pitch : nil,
+                                 referenceSource: isPostureCalibrated ? (calibrationState == .manual ? "manual" : "stable-window-sample") : "none"))
+    }
 
-        let side = SensorSide(motion.sensorLocation)
-        if status != .tracking(side) { status = .tracking(side) }
+    private func observeWorkspace() {
+        let pairs: [(Notification.Name, Notification.Name, String)] = [
+            (NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification, "sleep"),
+            (NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification, "screen"),
+            (NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.sessionDidBecomeActiveNotification, "session")
+        ]
+        for (pause, resume, reason) in pairs {
+            let center = NSWorkspace.shared.notificationCenter
+            workspaceObservers.append(center.addObserver(forName: pause, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.suspensionReasons.insert(reason)
+                self.stop()
+            })
+            workspaceObservers.append(center.addObserver(forName: resume, object: nil, queue: .main) { [weak self] _ in
+                guard let self else { return }
+                self.suspensionReasons.remove(reason)
+                if self.suspensionReasons.isEmpty { self.start() }
+            })
+        }
     }
 
     private var routeTick = 0
 
     private func checkStale() {
-        if status.isTracking, let last = lastSampleAt, Date().timeIntervalSince(last) > staleInterval {
-            log.notice("no samples for \(self.staleInterval)s, treating as disconnected")
+        let now = ProcessInfo.processInfo.systemUptime
+        if status.isTracking, let last = lastArrival, now - last > staleInterval {
+            invalidateCalibration()
             status = .waitingForHeadphones
+            reconnectSchedule.request(at: now)
         }
-        // 每 2 秒看一眼耳机是否还在 Mac 的音频路由上。只用来显示状态；
-        // 它回来的那一刻若仍没数据，重建一次会话（事件驱动，不循环）。
+        if isReconnecting, now >= manualReconnectUntil { isReconnecting = false }
         routeTick += 1
-        guard routeTick % 4 == 0 else { return }
-        let away = !AudioRoute.hasBluetoothOutput()
-        guard away != headphonesRoutedAway else { return }
-        headphonesRoutedAway = away
-        log.notice("headphones routed away: \(away)")
-        if !away, !status.isTracking, CMHeadphoneMotionManager.authorizationStatus() == .authorized {
-            log.notice("headphones back on this Mac, rebuilding session once")
+        if routeTick % 4 == 0 { refreshAudioRoute() }
+        guard suspensionReasons.isEmpty, !status.isTracking,
+              authorization == .authorized, bluetoothAudioPresent || connectedByDelegate else { return }
+        if now - lastRebuildAt >= 5, reconnectSchedule.takeDueAttempt(at: now) {
+            log.notice("recovering motion stream: attempt \(self.reconnectSchedule.attempts)")
             rebuildSession()
         }
+        reconnectExhausted = reconnectSchedule.exhausted
+    }
+
+    private func refreshAudioRoute() {
+        let snapshot = AudioRoute.snapshot()
+        guard snapshot.isKnown else { return }
+        let previous = routeSnapshot
+        routeSnapshot = snapshot
+        bluetoothAudioPresent = snapshot.hasBluetoothAudio
+        headphonesRoutedAway = !snapshot.hasBluetoothAudio
+        guard suspensionReasons.isEmpty, !status.isTracking, authorization == .authorized else { return }
+        reconnectSchedule.routeChanged(from: previous, to: snapshot, at: ProcessInfo.processInfo.systemUptime)
+        reconnectExhausted = reconnectSchedule.exhausted
     }
 
     private func startPermissionPolling() {
@@ -193,8 +379,7 @@ final class HeadTracker: NSObject, ObservableObject {
             self.refreshStatus()
             log.notice("permission poll: now=\(now.rawValue)")
             if now == .authorized {
-                self.manager.stopDeviceMotionUpdates()
-                self.start()
+                self.rebuildSession()
             }
         }
     }
@@ -202,7 +387,8 @@ final class HeadTracker: NSObject, ObservableObject {
     private func refreshStatus() {
         let auth = CMHeadphoneMotionManager.authorizationStatus()
         if authorization != auth { authorization = auth }
-        if !manager.isDeviceMotionAvailable { status = .unsupported; return }
+        if !manager.isDeviceMotionAvailable { invalidateCalibration(); status = .unsupported; return }
+        if auth != .authorized { invalidateCalibration() }
         switch auth {
         case .denied: status = .denied
         case .restricted: status = .restricted
@@ -218,17 +404,11 @@ extension HeadTracker: CMHeadphoneMotionManagerDelegate {
     func headphoneMotionManagerDidConnect(_ manager: CMHeadphoneMotionManager) {
         log.notice("delegate: didConnect")
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, manager === self.manager, self.suspensionReasons.isEmpty else { return }
             self.connectedByDelegate = true
             self.refreshStatus()
-            // 耳机（重新）连上了但数据没跟着来：给一次自动重建的机会
-            guard self.autoReconnectArmed else { return }
-            self.connectCheckTimer?.invalidate()
-            self.connectCheckTimer = Timer.scheduledTimer(withTimeInterval: self.connectGrace, repeats: false) { [weak self] _ in
-                guard let self, !self.status.isTracking else { return }
-                log.notice("connected but no data after \(self.connectGrace)s, auto reconnect once")
-                self.autoReconnectArmed = false
-                self.rebuildSession()
+            if !self.status.isTracking {
+                self.reconnectSchedule.request(at: ProcessInfo.processInfo.systemUptime, delay: 3)
             }
         }
     }
@@ -236,12 +416,11 @@ extension HeadTracker: CMHeadphoneMotionManagerDelegate {
     func headphoneMotionManagerDidDisconnect(_ manager: CMHeadphoneMotionManager) {
         log.notice("delegate: didDisconnect")
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, manager === self.manager, self.suspensionReasons.isEmpty else { return }
             self.connectedByDelegate = false
-            self.lastSampleAt = nil
+            self.invalidateCalibration()
             self.status = .waitingForHeadphones
-            self.autoReconnectArmed = true   // 下次连上再给一次机会
-            self.connectCheckTimer?.invalidate(); self.connectCheckTimer = nil
+            self.reconnectSchedule.request(at: ProcessInfo.processInfo.systemUptime, delay: 3)
         }
     }
 }

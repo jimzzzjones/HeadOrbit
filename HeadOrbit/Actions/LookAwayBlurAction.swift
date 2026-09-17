@@ -3,6 +3,7 @@ import Foundation
 
 /// 功能一：头转向左右（眼睛离开屏幕）超过阈值并持续一小段时间 → 全屏模糊；转回来 → 恢复。
 final class LookAwayBlurAction: ObservableObject, HeadAction {
+    let needsPostureCalibration = false
     let id = "look-away-blur"
     let title = "看向别处时模糊屏幕"
 
@@ -22,7 +23,7 @@ final class LookAwayBlurAction: ObservableObject, HeadAction {
 
     init() {
         let d = UserDefaults.standard
-        let threshold = d.object(forKey: "blur.threshold") as? Double ?? 35
+        let threshold = max(10, d.object(forKey: "blur.threshold") as? Double ?? 35)
         let dwell = d.object(forKey: "blur.dwell") as? Double ?? 0.6
         isEnabled = d.object(forKey: "blur.enabled") as? Bool ?? true
         thresholdDegrees = threshold

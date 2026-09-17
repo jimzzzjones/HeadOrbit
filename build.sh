@@ -4,5 +4,5 @@ set -euo pipefail
 cd "$(dirname "$0")"
 xcodegen generate
 xcodebuild -project HeadOrbit.xcodeproj -scheme HeadOrbit -configuration Debug \
-  -derivedDataPath build build 2>&1 | grep -E "error:|warning:|BUILD" || true
+  -derivedDataPath build build
 echo "→ build/Build/Products/Debug/HeadOrbit.app"

@@ -9,3 +9,6 @@ xcuserdata/
 HANDOFF.md
 generated/
 dist/
+
+.build/
+.swiftpm/
